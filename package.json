@@ -9,10 +9,11 @@
     "start": "electron .",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
-    "build:mac:ci": "electron-builder --mac --config.mac.hardenedRuntime=false",
+    "build:mac:ci": "electron-builder --mac --publish never --config.mac.hardenedRuntime=false",
     "build:dmg": "electron-builder --mac dmg",
     "build:dir": "electron-builder --mac dir",
     "build:win": "electron-builder --win nsis portable",
+    "build:win:ci": "electron-builder --win nsis portable --publish never",
     "build:win:dir": "electron-builder --win dir",
     "build:win:portable": "electron-builder --win portable",
     "publish": "electron-builder --publish always",
@@ -42,6 +43,7 @@
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "build/icon.icns",
+      "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
       "target": [
         "dmg",
         "zip"
@@ -57,13 +59,15 @@
           "target": "nsis",
           "arch": [
             "x64"
-          ]
+          ],
+          "artifactName": "${name}-${version}-win-x64-nsis.${ext}"
         },
         {
           "target": "portable",
           "arch": [
             "x64"
-          ]
+          ],
+          "artifactName": "${name}-${version}-win-x64-portable.${ext}"
         }
       ],
       "requestedExecutionLevel": "asInvoker"
@@ -91,7 +95,6 @@
         "owner": "1441958695sz-altalex",
         "repo": "code_text"
       }
-    ],
-    "artifactName": "${name}-${version}-${os}-${arch}-${target}.${ext}"
+    ]
   }
 }
