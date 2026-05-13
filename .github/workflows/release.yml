@@ -15,6 +15,9 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      # GitHub 托管机无 Apple/Windows 证书；关闭自动探测，使用临时签名以便完成打包
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - uses: actions/checkout@v4
 
@@ -41,6 +44,8 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - uses: actions/checkout@v4
 

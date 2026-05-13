@@ -7,7 +7,6 @@ dist/
 electron-smoke/
 startup-debug.log
 preview-startup.log
-build/icon.ico
 user-data/
 screenshot*
 !screenshot.png
