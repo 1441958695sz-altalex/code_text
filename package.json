@@ -87,8 +87,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "cloud26",
-        "repo": "auto-price-guard"
+        "owner": "1441958695sz-altalex",
+        "repo": "code_text"
       }
     ],
     "artifactName": "${name}-${version}-${os}-${arch}-${target}.${ext}"
