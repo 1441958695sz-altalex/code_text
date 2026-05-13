@@ -19,7 +19,7 @@
 
 ## 安装
 
-发布包在 **[Releases](https://github.com/1441958695sz-altalex/code_text/releases)**：选择最新版本，在页面下方 **Assets** 中下载对应系统的文件即可。
+发布包在 **[Releases](https://github.com/1441958695sz-altalex/jd-taobao-price-protect/releases)**：选择最新版本，在页面下方 **Assets** 中下载对应系统的文件即可。
 
 ### Windows
 
@@ -32,7 +32,7 @@
 
 ### macOS
 
-在同一 [Releases](https://github.com/1441958695sz-altalex/code_text/releases) 页面下载最新 `.dmg`（或 `.zip`），拖进 `/Applications`，首次打开后扫码登录即可。
+在同一 [Releases](https://github.com/1441958695sz-altalex/jd-taobao-price-protect/releases) 页面下载最新 `.dmg`（或 `.zip`），拖进 `/Applications`，首次打开后扫码登录即可。
 
 > 建议在平时经常登录京东/淘宝的设备上安装。陌生环境登录容易触发风控，验证码会比较难过。
 
