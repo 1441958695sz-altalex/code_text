@@ -10,9 +10,19 @@ const updateBtn = $("updateBtn");
 const appVersionEl = $("appVersion");
 const logBox = $("logBox");
 const accountListEl = $("accountList");
+const historyModal = $("historyModal");
+const historyTitle = $("historyTitle");
+const historySubtitle = $("historySubtitle");
+const historyCloseBtn = $("historyCloseBtn");
+const historyTotal = $("historyTotal");
+const historyMax = $("historyMax");
+const historyDays = $("historyDays");
+const historyChartWrap = $("historyChartWrap");
+const historyChart = $("historyChart");
 
 const PLATFORM_NAMES = { jd: "京东", tb: "淘宝" };
 const PLATFORM_COLORS = { jd: "jd", tb: "tb" };
+const CHART_COLORS = { jd: "#E03B3B", tb: "#FF6A00" };
 
 // Per-account DOM refs (Map<accountId, {dot, loginPill, ...}>)
 const ui = new Map();
@@ -22,9 +32,11 @@ const state = {
   loginStatus: new Map(), // accountId → boolean
   last: null,
   updateState: "idle",
+  historyAccountId: null,
 };
 
 const pad = (n) => String(n).padStart(2, "0");
+const formatMoney = (amount) => `¥${(Number(amount) || 0).toFixed(2)}`;
 
 function formatDateTime(iso) {
   if (!iso) return null;
@@ -55,6 +67,127 @@ function formatPast(iso) {
   if (hours < 24) return `${hours} 小时前`;
   const days = Math.floor(hours / 24);
   return `${days} 天前`;
+}
+
+function dateKey(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function buildRefundSeries(history = []) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = new Date(today);
+  start.setDate(today.getDate() - 29);
+
+  const days = [];
+  const amountByDay = new Map();
+  for (let i = 0; i < 30; i += 1) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    const key = dateKey(d);
+    amountByDay.set(key, 0);
+    days.push({
+      key,
+      label: `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+      amount: 0,
+    });
+  }
+
+  for (const item of history) {
+    const d = new Date(item.time);
+    if (Number.isNaN(d.getTime()) || d < start) continue;
+    const key = dateKey(d);
+    if (!amountByDay.has(key)) continue;
+    amountByDay.set(key, amountByDay.get(key) + (Number(item.amount) || 0));
+  }
+
+  for (const day of days) {
+    day.amount = amountByDay.get(day.key) || 0;
+  }
+  return days;
+}
+
+function drawHistoryChart(series, type) {
+  const ctx = historyChart.getContext("2d");
+  const rect = historyChartWrap.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  historyChart.width = Math.max(1, Math.floor(rect.width * dpr));
+  historyChart.height = Math.max(1, Math.floor(rect.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  const margin = { top: 18, right: 14, bottom: 30, left: 48 };
+  const width = rect.width - margin.left - margin.right;
+  const height = rect.height - margin.top - margin.bottom;
+  const maxAmount = Math.max(1, ...series.map((d) => d.amount));
+  const color = CHART_COLORS[type] || "#E03B3B";
+
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.38)";
+
+  for (let i = 0; i <= 4; i += 1) {
+    const y = margin.top + (height * i) / 4;
+    const value = maxAmount * (1 - i / 4);
+    ctx.beginPath();
+    ctx.moveTo(margin.left, y);
+    ctx.lineTo(margin.left + width, y);
+    ctx.stroke();
+    ctx.fillText(value.toFixed(value >= 10 ? 0 : 1), 6, y + 4);
+  }
+
+  const labelIndexes = [0, 14, 29];
+  for (const idx of labelIndexes) {
+    const x = margin.left + (width * idx) / 29;
+    ctx.fillText(series[idx].label, x - 16, margin.top + height + 22);
+  }
+
+  ctx.beginPath();
+  series.forEach((day, idx) => {
+    const x = margin.left + (width * idx) / Math.max(1, series.length - 1);
+    const y = margin.top + height - (day.amount / maxAmount) * height;
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = color;
+  for (const [idx, day] of series.entries()) {
+    if (day.amount <= 0) continue;
+    const x = margin.left + (width * idx) / Math.max(1, series.length - 1);
+    const y = margin.top + height - (day.amount / maxAmount) * height;
+    ctx.beginPath();
+    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function openHistory(accountId) {
+  const account = accounts.find((a) => a.id === accountId);
+  if (!account) return;
+  state.historyAccountId = accountId;
+
+  const platformName = PLATFORM_NAMES[account.type] || account.type;
+  const displayName = account.nickname
+    ? `${platformName} · ${account.nickname}`
+    : platformName;
+  const series = buildRefundSeries(account.refundHistory || []);
+  const total = series.reduce((sum, day) => sum + day.amount, 0);
+  const max = Math.max(0, ...series.map((day) => day.amount));
+  const activeDays = series.filter((day) => day.amount > 0).length;
+
+  historyTitle.textContent = `${displayName}退款历史`;
+  historySubtitle.textContent = "最近 30 天每日退款金额";
+  historyTotal.textContent = formatMoney(total);
+  historyMax.textContent = formatMoney(max);
+  historyDays.textContent = String(activeDays);
+  historyChartWrap.classList.toggle("empty", total <= 0);
+  historyModal.classList.add("show");
+
+  requestAnimationFrame(() => drawHistoryChart(series, account.type));
 }
 
 function setDot(el, kind, pulsing) {
@@ -133,6 +266,7 @@ function createAccountCard(account) {
       <button class="btn-run">
         <span class="run-btn-text">立即执行</span>
       </button>
+      <button class="btn-history">查看历史</button>
     </div>
     <div class="progress-strip"></div>
   `;
@@ -161,6 +295,7 @@ function createAccountCard(account) {
     nextRunMeta: card.querySelector(".next-run-meta"),
     runBtn: card.querySelector(".btn-run"),
     runBtnText: card.querySelector(".run-btn-text"),
+    historyBtn: card.querySelector(".btn-history"),
     progress: card.querySelector(".progress-strip"),
     intervalSelect,
     removeBtn: card.querySelector(".btn-remove"),
@@ -168,6 +303,7 @@ function createAccountCard(account) {
 
   // Event bindings
   refs.runBtn.onclick = () => window.api.runNow(account.id);
+  refs.historyBtn.onclick = () => openHistory(account.id);
   refs.removeBtn.onclick = () => {
     if (confirm(`确定删除此${platformName}账号吗？`)) {
       window.api.removeAccount(account.id);
@@ -294,6 +430,10 @@ function updateStatus(status) {
     renderAccount(a.id, a);
   }
 
+  if (historyModal.classList.contains("show") && state.historyAccountId) {
+    openHistory(state.historyAccountId);
+  }
+
   if (status.appVersion) appVersionEl.textContent = `v${status.appVersion}`;
 }
 
@@ -374,6 +514,16 @@ modalCancelBtn.onclick = () => platformModal.classList.remove("show");
 platformModal.onclick = (e) => {
   if (e.target === platformModal) platformModal.classList.remove("show");
 };
+
+historyCloseBtn.onclick = () => historyModal.classList.remove("show");
+historyModal.onclick = (e) => {
+  if (e.target === historyModal) historyModal.classList.remove("show");
+};
+window.addEventListener("resize", () => {
+  if (historyModal.classList.contains("show") && state.historyAccountId) {
+    openHistory(state.historyAccountId);
+  }
+});
 
 for (const optBtn of document.querySelectorAll(".modal-option")) {
   optBtn.onclick = async () => {

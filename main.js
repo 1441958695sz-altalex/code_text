@@ -1,8 +1,11 @@
 const {
   app,
   BrowserWindow,
+  Menu,
+  Tray,
   Notification,
   ipcMain,
+  nativeImage,
   session,
 } = require("electron");
 const path = require("path");
@@ -11,15 +14,22 @@ const { autoUpdater } = require("electron-updater");
 
 // ─── 常量 ─────────────────────────────────────────────────────
 const DEBUG = false;
+const APP_USER_MODEL_ID = "com.auto-price-guard";
+const IS_MAC = process.platform === "darwin";
+const IS_WINDOWS = process.platform === "win32";
 const MOBILE_UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1";
+const DESKTOP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+const LOGIN_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+const SOFT_LOGIN_FAILURE_LIMIT = 3;
 
 const PLATFORMS = {
   jd: {
     name: "京东",
     targetUrl:
       "https://h5.m.jd.com/babelDiy/Zeus/2RePMzTqg6UoffvMwtwVeMcnPGeg/index.html?defaultViewTab=0&appId=cuser&type=25#/",
-    loginUrl: "https://plogin.m.jd.com/login/login",
+    loginUrl: "https://passport.jd.com/new/login.aspx",
     cookieDomain: ".jd.com",
     loginCookies: ["pt_key", "pt_pin"],
     idCookie: "pt_pin",
@@ -28,7 +38,7 @@ const PLATFORMS = {
     name: "淘宝",
     targetUrl:
       "https://pages-fast.m.taobao.com/wow/a/act/tmall/dailygroup/16261/16699/wupr?wh_pid=daily-541787&disableNav=YES",
-    loginUrl: "https://main.m.taobao.com/?sprefer=sypc00",
+    loginUrl: "https://login.taobao.com/member/login.jhtml",
     cookieDomain: ".taobao.com",
     loginCookies: ["cookie2", "_tb_token_", "unb"],
     idCookie: "unb",
@@ -37,7 +47,9 @@ const PLATFORMS = {
 };
 
 // ─── 持久化存储 ───────────────────────────────────────────────
-const STORE_PATH = path.join(app.getPath("userData"), "settings.json");
+function getStorePath() {
+  return path.join(app.getPath("userData"), "settings.json");
+}
 
 function emptyAccount(type) {
   return {
@@ -50,6 +62,7 @@ function emptyAccount(type) {
     lastRunResult: null,
     totalSaved: 0,
     totalSuccessCount: 0,
+    refundHistory: [],
   };
 }
 
@@ -74,7 +87,7 @@ function generateId(type, accounts) {
 function loadStore() {
   let raw;
   try {
-    raw = JSON.parse(fs.readFileSync(STORE_PATH, "utf-8"));
+    raw = JSON.parse(fs.readFileSync(getStorePath(), "utf-8"));
   } catch {
     // 首次启动：默认创建京东和淘宝各一个账号
     return {
@@ -127,25 +140,91 @@ function loadStore() {
 }
 
 function saveStore() {
-  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+  fs.writeFileSync(getStorePath(), JSON.stringify(store, null, 2));
 }
 
-let store = loadStore();
+let store = { accounts: [] };
 
 function getAccount(accountId) {
   return store.accounts.find((a) => a.id === accountId);
 }
 
+function recordRefundHistory(account, amount, successCount) {
+  const now = new Date();
+  const cutoff = now.getTime() - 30 * 24 * 3600000;
+  const history = Array.isArray(account.refundHistory)
+    ? account.refundHistory
+    : [];
+  history.push({
+    time: now.toISOString(),
+    amount: Math.max(0, Number(amount) || 0),
+    successCount: Math.max(0, Number(successCount) || 0),
+  });
+  account.refundHistory = history.filter((item) => {
+    const t = new Date(item.time).getTime();
+    return Number.isFinite(t) && t >= cutoff;
+  });
+}
+
 // ─── 全局状态 ─────────────────────────────────────────────────
 let mainWindow = null;
+let tray = null;
 let rendererReady = false;
 let isQuitting = false;
 const logs = [];
 
 // Runtime state: per-account
 const runtime = new Map();
-for (const a of store.accounts) {
-  runtime.set(a.id, { isRunning: false, timer: null });
+function createRuntimeState() {
+  return {
+    isRunning: false,
+    timer: null,
+    loginFailures: 0,
+    loginCooldownUntil: 0,
+    loginWindow: null,
+  };
+}
+
+function initRuntime() {
+  runtime.clear();
+  for (const a of store.accounts) {
+    runtime.set(a.id, createRuntimeState());
+  }
+}
+
+function resetLoginRiskState(accountId) {
+  const rt = runtime.get(accountId);
+  if (!rt) return;
+  rt.loginFailures = 0;
+  rt.loginCooldownUntil = 0;
+}
+
+async function checkLoginWithGrace(accountId) {
+  const ok = await checkLogin(accountId);
+  const rt = runtime.get(accountId);
+  if (ok) {
+    resetLoginRiskState(accountId);
+    return true;
+  }
+
+  if (!rt) return false;
+  rt.loginFailures += 1;
+  const account = getAccount(accountId);
+  const hasPriorLogin =
+    !!account?.nickname ||
+    !!account?.lastRunTime ||
+    !!account?.totalSuccessCount ||
+    !!account?.totalSaved;
+
+  if (hasPriorLogin && rt.loginFailures < SOFT_LOGIN_FAILURE_LIMIT) {
+    addLog(
+      accountId,
+      `登录状态暂时无法确认（第 ${rt.loginFailures}/${SOFT_LOGIN_FAILURE_LIMIT} 次），暂不要求重新登录`
+    );
+    return "uncertain";
+  }
+
+  return false;
 }
 
 // 串行执行队列
@@ -284,13 +363,34 @@ function openLoginWindow(accountId) {
   if (!account) return;
   const cfg = PLATFORMS[account.type];
   const ses = session.fromPartition(getPartition(account));
+  const rt = runtime.get(accountId);
+  if (rt?.loginWindow && !rt.loginWindow.isDestroyed()) {
+    rt.loginWindow.show();
+    rt.loginWindow.focus();
+    addLog(accountId, "登录窗口已打开，请继续在当前窗口完成登录");
+    return;
+  }
+
+  const now = Date.now();
+  if (rt?.loginCooldownUntil && rt.loginCooldownUntil > now) {
+    addLog(
+      accountId,
+      `为避免触发平台风控，请 ${formatCooling(rt.loginCooldownUntil - now)} 后再重试登录`
+    );
+    return;
+  }
+
+  const useDesktopLogin = account.type === "jd" || account.type === "tb";
   const win = new BrowserWindow({
-    width: 420,
-    height: 750,
+    width: useDesktopLogin ? 980 : 420,
+    height: useDesktopLogin ? 760 : 750,
+    minWidth: useDesktopLogin ? 760 : 360,
+    minHeight: useDesktopLogin ? 620 : 600,
     title: `${cfg.name}登录`,
     webPreferences: { partition: getPartition(account) },
   });
-  win.loadURL(cfg.loginUrl, { userAgent: MOBILE_UA });
+  if (rt) rt.loginWindow = win;
+  win.loadURL(cfg.loginUrl, { userAgent: useDesktopLogin ? DESKTOP_UA : MOBILE_UA });
   addLog(accountId, "已打开登录窗口，请完成登录");
 
   let detected = false;
@@ -311,6 +411,7 @@ function openLoginWindow(accountId) {
       ses.cookies.on("changed", onCookieChanged);
       return;
     }
+    resetLoginRiskState(accountId);
     account.isNew = false;
     saveStore();
     addLog(accountId, "登录成功！");
@@ -333,19 +434,27 @@ function openLoginWindow(accountId) {
   });
 
   win.on("closed", async () => {
+    if (rt) rt.loginWindow = null;
     ses.cookies.removeListener("changed", onCookieChanged);
     if (detected) return;
     const ok = await checkLogin(accountId);
-    if (!ok && account.isNew) {
-      // 新增账号未完成登录，自动删除
-      stopScheduler(accountId);
-      await ses.clearStorageData();
-      const idx = store.accounts.findIndex((a) => a.id === accountId);
-      if (idx !== -1) store.accounts.splice(idx, 1);
-      runtime.delete(accountId);
+    if (ok) {
+      resetLoginRiskState(accountId);
+      account.isNew = false;
       saveStore();
-      addLog(null, `${cfg.name}账号未登录，已自动移除`);
+    } else {
+      if (rt) {
+        rt.loginFailures += 1;
+        rt.loginCooldownUntil = Date.now() + LOGIN_RETRY_COOLDOWN_MS;
+      }
+      account.isNew = false;
+      saveStore();
+      addLog(
+        accountId,
+        `本次未完成登录。为避免账号风控，请 ${formatCooling(LOGIN_RETRY_COOLDOWN_MS)} 后再重试`
+      );
       sendStatus();
+      sendLoginStatus(accountId, false);
       return;
     }
     sendLoginStatus(accountId, ok);
@@ -576,6 +685,7 @@ async function runJd(account, manual) {
       account.totalSaved = result.historyTotal;
       account.totalSuccessCount = result.historyCount;
     }
+    recordRefundHistory(account, result.totalAmount, result.successCount);
     account.lastRunTime = new Date().toISOString();
     saveStore();
     addLog(account.id, "本次执行完成");
@@ -849,6 +959,7 @@ async function runTb(account, manual) {
       account.totalSaved = result.historyTotal;
       account.totalSuccessCount = result.historyCount;
     }
+    recordRefundHistory(account, result.totalAmount, result.successCount);
     account.lastRunTime = new Date().toISOString();
     saveStore();
     addLog(account.id, "本次执行完成");
@@ -875,8 +986,12 @@ async function runPlatform(accountId, manual = false) {
   const account = getAccount(accountId);
   if (!account) return;
 
-  const ok = await checkLogin(accountId);
-  if (!ok) {
+  const loginState = await checkLoginWithGrace(accountId);
+  if (loginState !== true) {
+    if (loginState === "uncertain") {
+      addLog(accountId, "本次暂不执行，避免因反复验证触发账号风控");
+      return;
+    }
     addLog(accountId, "登录已过期，请重新登录后再执行");
     sendLoginStatus(accountId, false);
     stopScheduler(accountId);
@@ -922,10 +1037,10 @@ ipcMain.on("renderer-ready", () => {
 });
 
 ipcMain.handle("check-login", async (_e, accountId) => {
-  const ok = await checkLogin(accountId);
+  const ok = await checkLoginWithGrace(accountId);
   const rt = runtime.get(accountId);
-  if (ok && rt && !rt.timer) startScheduler(accountId);
-  return ok;
+  if (ok === true && rt && !rt.timer) startScheduler(accountId);
+  return ok !== false;
 });
 
 ipcMain.on("open-login", (_e, accountId) => openLoginWindow(accountId));
@@ -967,7 +1082,7 @@ ipcMain.handle("add-account", async (_e, type) => {
   const id = generateId(type, store.accounts);
   const account = { ...emptyAccount(type), id, isNew: true };
   store.accounts.push(account);
-  runtime.set(id, { isRunning: false, timer: null });
+  runtime.set(id, createRuntimeState());
   saveStore();
   sendStatus();
   addLog(id, "账号已创建");
@@ -1009,33 +1124,80 @@ ipcMain.on("install-update", () => {
 });
 
 // ─── 窗口 ──────────────────────────────────────────────────────
+function getTrayIcon() {
+  const iconPath = path.join(__dirname, "icon.iconset", "icon_32x32.png");
+  const image = nativeImage.createFromPath(iconPath);
+  if (image.isEmpty()) return image;
+  return IS_WINDOWS ? image.resize({ width: 16, height: 16 }) : image;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  if (tray) return;
+  tray = new Tray(getTrayIcon());
+  tray.setToolTip("价保助手");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开价保助手", click: showMainWindow },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ])
+  );
+  tray.on("click", showMainWindow);
+}
+
 function createMainWindow() {
-  mainWindow = new BrowserWindow({
+  const windowOptions = {
     width: 656,
     height: 860,
     minWidth: 544,
     minHeight: 720,
     title: "价保助手",
     resizable: true,
-    titleBarStyle: "hiddenInset",
     backgroundColor: "#F5F5F7",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
-  });
+  };
+  if (IS_MAC) windowOptions.titleBarStyle = "hiddenInset";
+  mainWindow = new BrowserWindow(windowOptions);
   mainWindow.loadFile("index.html");
   mainWindow.on("close", (e) => {
     if (isQuitting) return;
     e.preventDefault();
     mainWindow.hide();
+    if (IS_WINDOWS) {
+      addLog(null, "窗口已隐藏，价保助手会在系统托盘继续运行");
+    }
   });
 }
 
 // ─── 生命周期 ──────────────────────────────────────────────────
+if (IS_WINDOWS) {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+
 app.whenReady().then(async () => {
+  store = loadStore();
+  initRuntime();
   createMainWindow();
+  createTray();
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -1069,7 +1231,7 @@ app.whenReady().then(async () => {
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 2 * 3600000);
 
   app.on("activate", () => {
-    if (mainWindow) mainWindow.show();
+    showMainWindow();
   });
 });
 
@@ -1081,5 +1243,6 @@ app.on("before-quit", () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (IS_MAC || IS_WINDOWS) return;
+  app.quit();
 });

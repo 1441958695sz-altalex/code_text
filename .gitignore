@@ -1,5 +1,13 @@
+package-lock.json
 node_modules/
 dist/
+.corepack/
+.electron-cache/
+.pnpm-store/
+electron-smoke/
+startup-debug.log
+preview-startup.log
+build/icon.ico
 user-data/
 screenshot*
 !screenshot.png
