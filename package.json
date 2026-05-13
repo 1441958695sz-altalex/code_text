@@ -1,6 +1,6 @@
 {
   "name": "auto-price-guard",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "京东 / 淘宝价格保护自动申请工具",
   "author": "cloud26",
   "packageManager": "pnpm@11.1.0",
@@ -9,6 +9,7 @@
     "start": "electron .",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
+    "build:mac:ci": "electron-builder --mac --config.mac.hardenedRuntime=false",
     "build:dmg": "electron-builder --mac dmg",
     "build:dir": "electron-builder --mac dir",
     "build:win": "electron-builder --win nsis portable",

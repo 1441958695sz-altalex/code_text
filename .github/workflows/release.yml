@@ -62,7 +62,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build macOS (DMG + ZIP)
-        run: pnpm build:mac
+        run: pnpm build:mac:ci
         env:
           # 未在仓库 Secrets 中配置时，notarize.js 会跳过公证，仍可产出可下载的 dmg/zip
           APPLE_ID: ${{ secrets.APPLE_ID }}
